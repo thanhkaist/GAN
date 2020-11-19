@@ -36,6 +36,7 @@ class CycleGAN_Generator(nn.Module):
         # Note 3: You have to use instance normalization for normalizing the feature maps.
 
         ### YOUR CODE HERE (~ 15 lines)
+        
 
 
         ### END YOUR CODE

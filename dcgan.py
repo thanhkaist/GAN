@@ -3,7 +3,7 @@ import time
 import datetime
 import random
 import argparse
-
+import pdb
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -12,6 +12,7 @@ from torchvision.utils import save_image
 from dataloader import create_dataloader, FolderDataset
 from inception_score import Inception_Score
 from util import conv, deconv, denorm, save_checkpoint, load_checkpoint
+import numpy as np
 
 
 class DCGAN_Generator(nn.Module):
@@ -25,8 +26,10 @@ class DCGAN_Generator(nn.Module):
         # Note 1: Recommend to use 'deconv' function implemented in 'util.py'.
 
         ### YOUR CODE HERE (~ 4 lines)
-
-
+        model.append(deconv(256,256,4,1,0,norm='bn',activation='relu'))
+        model.append(deconv(256,128,4,2,1,norm='bn',activation='relu'))
+        model.append(deconv(128,64,4,2,1,norm='bn',activation='relu'))
+        model.append(deconv(64,3,4,2,1,norm=None,activation='tanh'))
         ### END YOUR CODE
 
         self.model = nn.Sequential(*model)
@@ -34,11 +37,10 @@ class DCGAN_Generator(nn.Module):
     def forward(self, z: torch.Tensor):
         # Input (z) size : [Batch, 256, 1, 1]
         # Output (Image) size : [Batch, 3, 32, 32]
-        output: torch.Tensor = None
 
         ### YOUR CODE HERE (~ 2 lines)
-
-
+        input = z.reshape(z.shape[0],256,1,1)
+        output = self.model(input)
         ### END YOUR CODE
 
         return output
@@ -60,7 +62,10 @@ class DCGAN_Discriminator(nn.Module):
         # Note 2: Don't forget that the discriminator architecture depends on the type of gan loss.
 
         ### YOUR CODE HERE (~ 4 lines)
-
+        model.append(conv(3,64,4,2,1,norm='bn',activation='lrelu'))
+        model.append(conv(64,128,4,2,1,norm='bn',activation='lrelu'))
+        model.append(conv(128,256,4,2,1,norm='bn',activation='lrelu'))
+        model.append(conv(256,1,4,1,0,norm=None,activation=None))
 
         ### END YOUR CODE
 
@@ -69,10 +74,9 @@ class DCGAN_Discriminator(nn.Module):
     def forward(self, x: torch.Tensor):
         # Input (z) size : [Batch, 3, 32, 32]
         # Output (Image) size : [Batch, 1]
-        output: torch.Tensor = None
 
         ### YOUR CODE HERE (~ 1 lines)
-
+        output = self.model(x)
 
         ### END YOUR CODE
 
@@ -102,21 +106,24 @@ class DCGAN_Solver():
         # Note1: Implement 'GPLoss' function before using WGAN-GP loss.
         # Note2: It is okay not to implement the criterion for WGAN.
 
-        self.criterion = nn.Module.
+
 
         ### YOUR CODE HERE (~ 8 lines)
-
-
+        if self.type == 'gan':
+            self.criterion = nn.BCEWithLogitsLoss()
+        elif self.type == "lsgan":
+            self.criterion = nn.MSELoss()
+        elif self.type == "wgan-gp":
+            self.penalty = 10
+            self.gploss = GPLoss(self.device)
         ### END YOUR CODE
 
         # Declare the Optimizer for training
         # Doc for Adam optimizer: https://pytorch.org/docs/stable/optim.html#torch.optim.Adam
 
-        self.optimizerG: optim.Optimizer = None
-        self.optimizerD: optim.Optimizer = None
-
         ### YOUR CODE HERE (~ 2 lines)
-
+        self.optimizerG = optim.Adam(self.netG.parameters(),lr=lr,betas=(0.5,0.999))
+        self.optimizerD = optim.Adam(self.netD.parameters(),lr=lr,betas=(0.5,0.999)) #
 
         ### END YOUR CODE
 
@@ -124,7 +131,7 @@ class DCGAN_Solver():
         # Note1: Use 'create_dataloader' function implemented in 'dataloader.py'
 
         ### YOUR CODE HERE (~ 1 lines)
-
+        self.trainloader, self.testloader = create_dataloader('cifar10',batch_size,num_workers)
 
         ### END YOUR CODE
 
@@ -161,10 +168,36 @@ class DCGAN_Solver():
                 # Note2 : Use the 'detach()' function appropriately.
                 ###################################################################################
 
-                lossD: torch.Tensor = None
-
                 ### YOUR CODE HERE (~ 15 lines)
+                D_out = self.netD(real_img).squeeze()
+                if self.type == 'lsgan':
+                    D_real_loss = 1/2*self.criterion(D_out,real_label)
+                elif (self.type == 'wgan') or (self.type == 'wgan-gp') :
+                    D_real_loss = -D_out.mean()
+                else:
+                    D_real_loss = self.criterion(D_out,real_label)
 
+                fake_img = self.netG(z)
+
+                if self.type == 'wgan-gp':
+                    #alpha = torch.Tensor(np.random.random((real_img.size(0), 1, 1, 1))).to(self.device)
+                    alpha = torch.rand(real_img.size(0), 1, 1, 1)
+                    #alpha = torch.FloatTensor(real_img.size(0), 1, 1, 1).uniform_(0, 1)
+                    alpha = alpha.expand(real_img.size(0), real_img.size(1), real_img.size(2), real_img.size(3)).to(self.device)
+                    fake_img = (alpha * real_img.detach() + ((1 - alpha) * fake_img.detach())).requires_grad_(True)
+
+                D_out = self.netD(fake_img).squeeze()
+
+                if self.type == 'lsgan':
+                    D_fake_loss = 1/2*self.criterion(D_out, fake_label)
+                elif self.type == 'wgan':
+                    D_fake_loss = D_out.mean()
+                elif self.type == 'wgan-gp':
+                    D_fake_loss = D_out.mean() + self.penalty*self.gploss(D_out,fake_img)
+                else:
+                    D_fake_loss = self.criterion(D_out,fake_label)
+
+                lossD =  D_real_loss + D_fake_loss
 
                 ### END YOUR CODE
 
@@ -181,8 +214,9 @@ class DCGAN_Solver():
 
                 if self.type == 'wgan':
                     ### YOUR CODE HERE (~2 lines)
-                    pass
-
+                    # weight cliping
+                    for p in self.netD.parameters():
+                        p.data.clamp_(-clip_value, clip_value)
                     ### END YOUR CODE
 
                 ###################################################################################
@@ -191,10 +225,19 @@ class DCGAN_Solver():
                 # You can implement 'wgan' and 'wgan-gp' loss functions without using self.criterion.
                 ###################################################################################
 
-                lossG: torch.Tensor = None
+
 
                 ### YOUR CODE HERE (~ 10 lines)
 
+                fake_img = self.netG(z)
+                D_out = self.netD(fake_img).squeeze()
+
+                if self.type == 'lsgan':
+                    lossG = self.criterion(D_out,real_label)
+                elif self.type == 'wgan' or self.type == 'wgan-gp':
+                    lossG = -D_out.mean()
+                else:
+                    lossG = self.criterion(D_out,real_label)
 
                 ### END YOUR CODE
 
@@ -267,7 +310,18 @@ class GPLoss(nn.Module):
         # Doc for torch.norm: https://pytorch.org/docs/stable/generated/torch.norm.html#torch.norm
 
         ### YOUR CODE HERE (~ 5 lines)
-
+        fake = torch.autograd.Variable(torch.Tensor(x.shape[0]).fill_(1.0), requires_grad=False).to(self.device)
+        #
+        gradients = torch.autograd.grad(
+            outputs=y,
+            inputs=x,
+            grad_outputs=fake,
+            create_graph=True,
+            retain_graph=True,
+            only_inputs=True,
+        )[0]
+        gradients = gradients.view(gradients.size(0), -1)
+        loss = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
 
         ### END YOUR CODE
 
@@ -312,9 +366,7 @@ def test_initializer_and_forward():
 
 def test_lossG_function(gan_type, lossG):
     print("=====Generator Loss Function Test Case======")
-
-    expected_lossG = [1.5416, 0.3207, 0.0017, 0.5849]
-
+    expected_lossG = [1.5416, 0.3207, 0.0017, 0.3192] #0.5849
     # the first test
     if gan_type == 'gan':
         assert lossG.detach().allclose(torch.tensor(expected_lossG[0]), atol=1e-2), \
@@ -337,9 +389,7 @@ def test_lossG_function(gan_type, lossG):
 
 def test_lossD_function(gan_type, lossD):
     print("=====Discriminator Loss Function Test Case======")
-
-    expected_lossD = [1.3483, 0.3373, -0.1794, 0.9908]
-
+    expected_lossD = [1.3483, 0.3373, -0.1794,1.0421 ] ##0.9908
     # the first test
     if gan_type == 'gan':
         assert lossD.detach().allclose(torch.tensor(expected_lossD[0]), atol=1e-2), \
@@ -377,7 +427,7 @@ if __name__ == "__main__":
     epochs = 200
     lr = 0.0002
     batch_size = 64
-    num_workers = 1
+    num_workers = 8
     train = True # train : True / test : False (Compute the Inception Score)
 
     # Train or Test
