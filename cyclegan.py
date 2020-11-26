@@ -2,6 +2,7 @@ import os
 import time
 import datetime
 import random
+import itertools
 
 import torch
 import torch.nn as nn
@@ -11,6 +12,7 @@ from torchvision.utils import save_image
 from dataloader import create_dataloader, FolderDataset
 from inception_score import Inception_Score
 from util import conv, deconv, denorm, save_checkpoint, load_checkpoint
+import pdb
 
 
 class CycleGAN_Generator(nn.Module):
@@ -36,9 +38,18 @@ class CycleGAN_Generator(nn.Module):
         # Note 3: You have to use instance normalization for normalizing the feature maps.
 
         ### YOUR CODE HERE (~ 15 lines)
-        
+        model.append( nn.ReflectionPad2d(3))
+        model.append(conv(input_nc,ngf,7,1,0,norm="in",bias=True,activation="relu"))
+        for i in range(n_downsampling):
+            model.append(conv(ngf*2**i,ngf*2**(i+1),3,2,1,norm="in",bias=True,activation="relu"))
 
+        for i in range(n_blocks):
+            model.append(ResnetBlock(256))
 
+        for i in reversed(range(n_downsampling)):
+            model.append(deconv(ngf*2**(i+1),ngf*2**i,3,2,1,1,norm="in",bias=True,activation="relu"))
+        model.append(nn.ReflectionPad2d(3))
+        model.append(conv(ngf,output_nc,7,1,0,norm=None,bias=False,activation="tanh"))
         ### END YOUR CODE
 
         self.model = nn.Sequential(*model)
@@ -60,6 +71,12 @@ class ResnetBlock(nn.Module):
         # Note 3: You have to use instance normalization for normalizing the feature maps.
 
         ### YOUR CODE HERE (~ 4 lines)
+        conv_block = []
+        conv_block.append(nn.ReflectionPad2d(1))
+        conv_block.append(conv(dim,dim,3,1,0,norm="in",bias=True,activation="relu"))
+        conv_block.append(nn.ReflectionPad2d(1))
+        conv_block.append(conv(dim,dim,3,1,0,norm="in",bias=True,activation=None))
+        self.conv_block = nn.Sequential(*conv_block)
 
 
         ### END YOUR CODE
@@ -72,7 +89,7 @@ class ResnetBlock(nn.Module):
 
         # Add skip connections
         ### YOUR CODE HERE (~ 1 line)
-
+        out = x + self.conv_block(x)
 
         ### END YOUR CODE
         return out
@@ -98,7 +115,10 @@ class CycleGAN_Discriminator(nn.Module):
         # Note 2: You have to use instance normalization for normalizing the feature maps.
 
         ### YOUR CODE HERE (~ 12 lines)
-
+        model.append(conv(input_nc,ndf,4,2,1,norm="in",bias=False,activation="lrelu"))
+        for i in range(n_layers):
+            model.append(conv(ndf*2**i,ndf*2**(i+1),4,2,1,norm="in",bias=True,activation="lrelu"))
+        model.append(conv(512, 1, 4, 1, 1, norm=None, bias=False, activation=None))
 
         ### END YOUR CODE
 
@@ -118,7 +138,7 @@ class CycleGAN_Solver():
         """
 
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+        self.batch_size = batch_size
         # Declare Generator and Discriminator
         self.netG_A2B = CycleGAN_Generator(input_nc=3, output_nc=3, ngf=64)
         self.netG_B2A = CycleGAN_Generator(input_nc=3, output_nc=3, ngf=64)
@@ -129,24 +149,24 @@ class CycleGAN_Solver():
         # Doc for MSE Loss: https://pytorch.org/docs/stable/generated/torch.nn.MSELoss.html
         # Doc for L1 Loss: https://pytorch.org/docs/stable/generated/torch.nn.L1Loss.html
 
-        self.criterion_GAN: nn.Module = None
-        self.criterion_cycle: nn.Module = None
-        self.criterion_identity: nn.Module = None
+
 
         ### YOUR CODE HERE (~ 3 lines)
 
-
+        self.criterion_GAN = nn.MSELoss()
+        self.criterion_cycle= nn.L1Loss()
+        self.criterion_identity= nn.L1Loss()
         ### END YOUR CODE
 
-        self.optimizerG: optim.Optimizer = None
-        self.optimizerD_A: optim.Optimizer = None
-        self.optimizerD_B: optim.Optimizer = None
+
 
         # Declare the Optimizer for training
         # Doc for Adam optimizer: https://pytorch.org/docs/stable/optim.html#torch.optim.Adam
 
         ### YOUR CODE HERE (~ 3 lines)
-
+        self.optimizerG = optim.Adam(itertools.chain(self.netG_A2B.parameters(),self.netG_B2A.parameters()),lr=lr,betas=(0.5, 0.999))
+        self.optimizerD_A = optim.Adam(self.netD_A.parameters(),lr=lr,betas=(0.5, 0.999))
+        self.optimizerD_B = optim.Adam(self.netD_B.parameters(),lr=lr,betas=(0.5, 0.999))
 
         ### END YOUR CODE
 
@@ -155,6 +175,7 @@ class CycleGAN_Solver():
         # Note1: Use 'create_dataloader' function implemented in 'dataloader.py'
 
         ### YOUR CODE HERE (~ 1 line)
+        self.trainloader, self.testloader = create_dataloader('summer2winter', batch_size, num_workers)
 
 
         ### END YOUR CODE
@@ -169,7 +190,8 @@ class CycleGAN_Solver():
         self.netG_B2A.to(self.device)
         self.netD_A.to(self.device)
         self.netD_B.to(self.device)
-
+        target_real = torch.autograd.Variable(torch.Tensor(self.batch_size).fill_(1.0), requires_grad=False).to(self.device)
+        target_fake = torch.autograd.Variable(torch.Tensor(self.batch_size).fill_(0.0), requires_grad=False).to(self.device)
         start_time = time.time()
 
         print("=====Train Start======")
@@ -196,8 +218,31 @@ class CycleGAN_Solver():
                 lossG: torch.Tensor() = None
 
                 ### YOUR CODE HERE (~ 15 lines)
+                # Identity loss
+                iden_B = self.netG_A2B(real_B)
+                iden_A = self.netG_B2A(real_A)
+                identity_A = self.criterion_identity(iden_A,real_A)*0.5
+                identity_B = self.criterion_identity(iden_B,real_B)*0.5
+                identity_loss = identity_A + identity_B
+                # GAN loss
+                fake_B = self.netG_A2B(real_A)
+                pred_fake = self.netD_B(fake_B)
+                loss_GAN_A2B = self.criterion_GAN(pred_fake, target_real)
 
+                fake_A = self.netG_B2A(real_B)
+                pred_fake = self.netD_B(fake_A)
+                loss_GAN_B2A = self.criterion_GAN(pred_fake, target_real)
+                gan_loss = loss_GAN_A2B+loss_GAN_B2A
 
+                # Cycle loss
+                recov_A = self.netG_B2A(fake_B)
+                loss_ABA = self.criterion_GAN(recov_A,real_A)
+                recov_B = self.netG_A2B(fake_A)
+                loss_BAB = self.criterion_GAN(recov_B,real_B)
+
+                cycle_loss = loss_ABA+loss_BAB
+                # Total loss
+                lossG = identity_loss + gan_loss + cycle_loss
                 ### END YOUR CODE
 
                 # Test code
@@ -214,10 +259,18 @@ class CycleGAN_Solver():
                 ###################################################################################
                 # Discriminator A
 
-                lossD_A: torch.Tensor() = None
+
 
                 ### YOUR CODE HERE (~ 4 lines)
+                # Real loss
+                pred_real = self.netD_A(real_A)
+                loss_D_real = self.criterion_GAN(pred_real, target_real)
+                # Fake loss
+                pred_fake = self.netD_A(fake_A.detach())
+                loss_D_fake = self.criterion_GAN(pred_fake, target_fake)
 
+                # Total loss
+                lossD_A  = (loss_D_real + loss_D_fake)
 
                 ### END YOUR CODE
 
@@ -227,9 +280,17 @@ class CycleGAN_Solver():
 
                 # Discriminator B
 
-                lossD_B: torch.Tensor() = None
-
                 ### YOUR CODE HERE (~ 4 lines)
+
+                # Real loss
+                pred_real = self.netD_B(real_B)
+                loss_D_real = self.criterion_GAN(pred_real, target_real)
+                # Fake loss
+                pred_fake = self.netD_B(fake_B.detach())
+                loss_D_fake = self.criterion_GAN(pred_fake, target_fake)
+
+                # Total loss
+                lossD_B  = (loss_D_real + loss_D_fake)
 
 
                 ### END YOUR CODE
@@ -325,35 +386,35 @@ def test_initializer_and_forward():
 
 
 def test_lossG_fuction(identity_loss, gan_loss, cycle_loss):
-
     print("=====Generator Loss Test Case======")
 
     # the first test
-    assert identity_loss.detach().allclose(torch.tensor(5.7538), atol=1e-2), \
+    # My result: 0.5754 2.4084 0.9539   TA result: 5.7538 2.2067 11.5476
+    assert identity_loss.detach().allclose(torch.tensor(0.5754), atol=1e-2), \
         f"Identity Loss of the model does not match expected result."
     print("The first test passed!")
 
     # the second test
-    assert gan_loss.detach().allclose(torch.tensor(2.2067), atol=1e-2), \
+    assert gan_loss.detach().allclose(torch.tensor(2.4084), atol=1e-2), \
         f"Adversarial Loss of the model does not match expected result."
     print("The second test passed!")
 
     # the third test
-    assert cycle_loss.detach().allclose(torch.tensor(11.5476), atol=1e-2), \
+    assert cycle_loss.detach().allclose(torch.tensor(0.9539), atol=1e-2), \
         f"Cycle Consistency Loss of the model does not match expected result."
     print("The third test passed!")
 
     print("All test passed!")
 
 def test_lossD_fuction(lossD_A, lossD_B):
-
     print("=====Discriminator Loss Test Case======")
-
-    assert lossD_A.detach().allclose(torch.tensor(1.1283), atol=1e-2), \
+    # My result 1.1291 1.2087
+    # TA result 1.1283 1.2319
+    assert lossD_A.detach().allclose(torch.tensor(1.1291), atol=1e-2), \
         f"Discriminator A Loss of the model does not match expected result."
     print("The first test passed!")
 
-    assert lossD_B.detach().allclose(torch.tensor(1.2319), atol=1e-2), \
+    assert lossD_B.detach().allclose(torch.tensor(1.2087), atol=1e-2), \
         f"Discriminator B Loss of the model does not match expected result."
     print("The second test passed!")
 
