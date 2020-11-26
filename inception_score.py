@@ -21,7 +21,7 @@ class Inception_Score():
 
         self.dataset = dataset
         self.dataloader = data.DataLoader(dataset=dataset, batch_size=self.batch_size, num_workers=1)
-        self.transform = nn.Upsample(size=(299, 299), mode='bilinear').to(self.device)
+        self.transform = nn.Upsample(size=(299, 299), mode='bilinear',align_corners=False).to(self.device)
 
         # Inception Model
         self.inception_model = inception_v3(pretrained=True, transform_input=False).to(self.device)
@@ -34,8 +34,46 @@ class Inception_Score():
         # Compute the mean KL-divergence
         # You have to calculate the inception score.
         # The logit values from inception model are already stored in 'preds'.
+        # Set up dtype
+        resize = True
 
+        if self.device == torch.device('cuda'):
+            dtype = torch.cuda.FloatTensor
+        else:
+            if torch.cuda.is_available():
+                print("WARNING: You have a CUDA device, so you should probably set cuda=True")
+            dtype = torch.FloatTensor
         inception_score = 0.0
+        up = nn.Upsample(size=(299, 299), mode='bilinear',align_corners=False).type(dtype)
+
+        def get_pred(x):
+            if resize:
+                x = up(x)
+            x = self.inception_model(x)
+            return F.softmax(x,dim=1).data.cpu().numpy()
+
+        # Get predictions
+
+        for i, batch in enumerate(self.dataloader, 0):
+            batch = batch.type(dtype)
+            batchv = torch.autograd.Variable(batch)
+            batch_size_i = batch.size()[0]
+
+            preds[i * self.batch_size:i * self.batch_size + batch_size_i] = get_pred(batchv)
+
+        # Now compute the mean kl-div
+        split_scores = []
+
+        for k in range(splits):
+            part = preds[k * (self.N // splits): (k + 1) * (self.N // splits), :]
+            py = np.mean(part, axis=0)
+            scores = []
+            for i in range(part.shape[0]):
+                pyx = part[i, :]
+                scores.append(entropy(pyx, py))
+            split_scores.append(np.exp(np.mean(scores)))
+
+        inception_score =np.mean(split_scores) #, np.std(split_scores)
 
         ### YOUR CODE HERE (~ 20 lines)
 
