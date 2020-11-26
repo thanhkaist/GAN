@@ -42,8 +42,22 @@ class Summer2WinterDataset(data.Dataset):
         # This dataset have to load the train or test files depending on the 'train' option.
 
         ### YOUR CODE HERE (~ 10 lines)
+        self.train =train
+        if self.train:
+            self.image_list_A = os.listdir(dataset_dir+'trainA')
+            self.folderA = dataset_dir +'trainA'
+            self.image_list_B = os.listdir(dataset_dir + 'trainB')
+            self.folderB = dataset_dir + 'trainB'
+        else:
+            self.image_list_A = os.listdir(dataset_dir + 'testA')
+            self.folderA = dataset_dir + 'testA'
+            self.image_list_B = os.listdir(dataset_dir + 'testB')
+            self.folderB = dataset_dir + 'testB'
 
-
+        self.image_list_A.sort()
+        self.image_list_B.sort()
+        self.transform = transforms.Compose([transforms.ToTensor(),
+                                             transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))])
         ### END YOUR CODE
 
     def __getitem__(self, index):
@@ -52,7 +66,8 @@ class Summer2WinterDataset(data.Dataset):
         # You have to sample the index to load data from different pairs.
 
         ### YOUR CODE HERE (~ 2 lines)
-
+        image_A= Image.open(os.path.join(self.folderA, self.image_list_A[index]))
+        image_B = Image.open(os.path.join(self.folderB, self.image_list_B[random.randint(0,len(self.image_list_B)-1)]))
 
         ### END YOUR CODE
 
