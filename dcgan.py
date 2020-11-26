@@ -122,8 +122,8 @@ class DCGAN_Solver():
         # Doc for Adam optimizer: https://pytorch.org/docs/stable/optim.html#torch.optim.Adam
 
         ### YOUR CODE HERE (~ 2 lines)
-        self.optimizerG = optim.Adam(self.netG.parameters(),lr=lr,betas=(0.5,0.999))
-        self.optimizerD = optim.Adam(self.netD.parameters(),lr=lr,betas=(0.5,0.999)) #
+        self.optimizerG = optim.Adam(self.netG.parameters(),lr=lr) #betas=(0.5,0.999)
+        self.optimizerD = optim.Adam(self.netD.parameters(),lr=lr) #,betas=(0.5,0.999)
 
         ### END YOUR CODE
 
@@ -148,6 +148,7 @@ class DCGAN_Solver():
         start_time = time.time()
 
         print("=====Train Start======")
+
 
         for epoch in range(epochs):
             for iter, (real_img, _) in enumerate(self.trainloader):
@@ -178,24 +179,31 @@ class DCGAN_Solver():
                     D_real_loss = self.criterion(D_out,real_label)
 
                 fake_img = self.netG(z)
+                fake_img_D = fake_img.detach()
 
-                if self.type == 'wgan-gp':
-                    #alpha = torch.Tensor(np.random.random((real_img.size(0), 1, 1, 1))).to(self.device)
-                    alpha = torch.rand(real_img.size(0), 1, 1, 1)
-                    #alpha = torch.FloatTensor(real_img.size(0), 1, 1, 1).uniform_(0, 1)
-                    alpha = alpha.expand(real_img.size(0), real_img.size(1), real_img.size(2), real_img.size(3)).to(self.device)
-                    fake_img = (alpha * real_img.detach() + ((1 - alpha) * fake_img.detach())).requires_grad_(True)
-
-                D_out = self.netD(fake_img).squeeze()
+                D_out = self.netD(fake_img_D).squeeze()
 
                 if self.type == 'lsgan':
                     D_fake_loss = 1/2*self.criterion(D_out, fake_label)
                 elif self.type == 'wgan':
                     D_fake_loss = D_out.mean()
                 elif self.type == 'wgan-gp':
-                    D_fake_loss = D_out.mean() + self.penalty*self.gploss(D_out,fake_img)
+                    self.netD.zero_grad()
+                    D_fake_loss = D_out.mean()
+                    D_real_loss.backward()
+                    D_fake_loss.backward()
+                    alpha = torch.rand(real_img.size(0), 1, 1, 1).to(self.device)
+                    alpha = alpha.expand(real_img.size(0), real_img.size(1), real_img.size(2), real_img.size(3)).to(
+                        self.device)
+                    x_both = torch.autograd.Variable((alpha * real_img.data + ((1 - alpha) * fake_img_D.data)),
+                                                     requires_grad=True)
+
+                    D_both = self.netD(x_both).squeeze()
+                    loss_penalty = self.penalty * self.gploss(D_both, x_both)
+                    D_fake_loss = D_fake_loss+loss_penalty
                 else:
                     D_fake_loss = self.criterion(D_out,fake_label)
+
 
                 lossD =  D_real_loss + D_fake_loss
 
@@ -205,8 +213,11 @@ class DCGAN_Solver():
                 if epoch == 0 and iter == 0:
                     test_lossD_function(self.type, lossD)
 
-                self.netD.zero_grad()
-                lossD.backward()
+                if self.type == 'wgan-gp':
+                    loss_penalty.backward()
+                else:
+                    self.netD.zero_grad()
+                    lossD.backward()
                 self.optimizerD.step()
 
                 ### Clipping the weights of Discriminator
@@ -229,7 +240,7 @@ class DCGAN_Solver():
 
                 ### YOUR CODE HERE (~ 10 lines)
 
-                fake_img = self.netG(z)
+                # fake_img = self.netG(z)
                 D_out = self.netD(fake_img).squeeze()
 
                 if self.type == 'lsgan':
@@ -310,22 +321,26 @@ class GPLoss(nn.Module):
         # Doc for torch.norm: https://pytorch.org/docs/stable/generated/torch.norm.html#torch.norm
 
         ### YOUR CODE HERE (~ 5 lines)
-        fake = torch.autograd.Variable(torch.Tensor(x.shape[0]).fill_(1.0), requires_grad=False).to(self.device)
+        #fake = torch.autograd.Variable(torch.Tensor(x.shape[0]).fill_(1.0), requires_grad=False).to(self.device)
+        grad_outputs = torch.ones(x.shape[0]).to(self.device)
         #
         gradients = torch.autograd.grad(
             outputs=y,
             inputs=x,
-            grad_outputs=fake,
+            grad_outputs=grad_outputs,
             create_graph=True,
             retain_graph=True,
             only_inputs=True,
         )[0]
-        gradients = gradients.view(gradients.size(0), -1)
-        loss = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
+
+        grad_penalty = ((gradients.norm(2, 1).norm(2, 1).norm(2, 1) - 1) ** 2).mean()
+
+        #gradients = gradients.view(gradients.size(0), -1)
+        #loss = ((gradients.norm(2, dim=1) - 1) ** 2).mean()
 
         ### END YOUR CODE
 
-        return loss
+        return grad_penalty
 
 
 #############################################
@@ -366,7 +381,7 @@ def test_initializer_and_forward():
 
 def test_lossG_function(gan_type, lossG):
     print("=====Generator Loss Function Test Case======")
-    expected_lossG = [1.5416, 0.3207, 0.0017, 0.3192] #0.5849
+    expected_lossG = [1.5416, 0.3207, 0.0017, 0.5849] #0.5849 0.3192
     # the first test
     if gan_type == 'gan':
         assert lossG.detach().allclose(torch.tensor(expected_lossG[0]), atol=1e-2), \
@@ -389,7 +404,7 @@ def test_lossG_function(gan_type, lossG):
 
 def test_lossD_function(gan_type, lossD):
     print("=====Discriminator Loss Function Test Case======")
-    expected_lossD = [1.3483, 0.3373, -0.1794,1.0421 ] ##0.9908
+    expected_lossD = [1.3483, 0.3373, -0.1794, 0.9908 ]
     # the first test
     if gan_type == 'gan':
         assert lossD.detach().allclose(torch.tensor(expected_lossD[0]), atol=1e-2), \
@@ -421,6 +436,7 @@ if __name__ == "__main__":
 
     # Test Code
     test_initializer_and_forward()
+
 
     # Hyper-parameters
     gan_type = opt.gan_type
